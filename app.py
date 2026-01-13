@@ -1,9 +1,10 @@
 import streamlit as st
 import tensorflow as tf
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageChops, ImageEnhance
 import numpy as np
 import requests
 from io import BytesIO
+import cv2
 import time
 import os
 
@@ -154,7 +155,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.info("💡 **Tip:** For best results, use high-quality images.")
-    st.markdown("Made with ❤️ for Deep Learning")
+    st.markdown("Made with Deep Learning")
 
 # --- Main Content ---
 
@@ -180,23 +181,55 @@ else:
                     time.sleep(1.5) 
                     
                     # Preprocessing
-                    img = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
-                    img_array = np.asarray(img)
-                    img_array = img_array / 255.0  # Normalize if model expects [0,1]
-                    img_array = np.expand_dims(img_array, axis=0) # Batch dimension
-
-                    # Prediction
                     try:
-                        prediction = model.predict(img_array)
-                        score = prediction[0][0] # Assuming sigmoid output [0, 1]
+                        # 1. Convert PIL to OpenCV format
+                        # PIL is RGB, OpenCV expects BGR (or we can just work in RGB if we are consistent)
+                        # The user code: imread (BGR) -> cvtColor (RGB). 
+                        # We have PIL Image (RGB). We can work with it directly.
                         
-                        # Logic: 0 = AI, 1 = Real (adjust based on user's model)
-                        # Typically keys are sorted alphabetically: AI vs Human -> AI=0, Human=1
+                        target_size = 128
                         
-                        is_human = score > 0.5
-                        confidence = score if is_human else 1 - score
+                        # Ensure RGB
+                        if image.mode != "RGB":
+                            image = image.convert("RGB")
+                            
+                        # Resize (using OpenCV to be consistent with training logic if preferred, 
+                        # but PIL resize is fine/similar. User used cv2.resize)
+                        img_array = np.array(image)
+                        img_resized = cv2.resize(img_array, (target_size, target_size))
                         
-                        st.balloons() if is_human else None
+                        # 2. Edge Detection
+                        img_gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
+                        edges = cv2.Canny(img_gray, 100, 200)
+                        
+                        # 3. Stack edges to 3 channels
+                        # (128, 128) -> (128, 128, 3)
+                        edges_3_channel = np.stack([edges, edges, edges], axis=-1)
+                        
+                        # 4. Normalize
+                        img_rgb_normalized = img_resized.astype('float32') / 255.0
+                        edges_normalized = edges_3_channel.astype('float32') / 255.0
+                        
+                        # 5. Concatenate
+                        combined_input = np.concatenate((img_rgb_normalized, edges_normalized), axis=-1)
+                        combined_input = np.expand_dims(combined_input, axis=0) # (1, 128, 128, 6)
+
+                        # Prediction
+                        prediction = model.predict(combined_input, verbose=0)[0]
+                        # Output shape is (2,): [Prob_Class0, Prob_Class1]
+                        
+                        predicted_label_idx = np.argmax(prediction)
+                        confidence_percentage = prediction[predicted_label_idx]
+                        
+                        # MAPPING:
+                        # Usually 0=AI, 1=Real/Human. 
+                        # If the user finds it flipped, we can swap these.
+                        # Based on standard datasets: 0: AI, 1: Real
+                        
+                        is_human = (predicted_label_idx == 1)
+                        
+                        if is_human:
+                            st.balloons()
                         
                         result_class = "real-art" if is_human else "ai-art"
                         result_text = "✨ Human Created" if is_human else "🤖 AI Generated"
@@ -207,17 +240,20 @@ else:
                             <div style="font-size: 3rem; margin-bottom: 10px;">{icon}</div>
                             <h2 style="margin:0; color: inherit;">{result_text}</h2>
                             <p style="font-size: 1.1rem; margin-top: 10px;">Confidence Score</p>
-                            <h3 style="font-size: 2.5rem; color: inherit;">{confidence:.1%}</h3>
+                            <h3 style="font-size: 2.5rem; color: inherit;">{confidence_percentage:.1%}</h3>
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # Extra metrics
+                         # Extra metrics
                         st.markdown("### 📊 Detailed Composition")
-                        st.progress(int(confidence * 100))
+                        st.progress(int(confidence_percentage * 100))
                         st.caption(f"Probability of being {result_text}")
+                        
+                        # Debug info for user to verify classes
+                        # st.write(f"Raw Prediction: {prediction}") 
 
                     except Exception as e:
-                        st.error(f"Prediction Error: {e}")
+                        st.error(f"Analysis Error: {e}")
             else:
                 st.markdown("""
                 <div class="stCard">
